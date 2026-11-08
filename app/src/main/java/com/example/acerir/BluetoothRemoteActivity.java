@@ -257,7 +257,43 @@ public class BluetoothRemoteActivity extends Activity {
         }
     }
 
-    private void startProfileTimeout() {\n        cancelProfileTimeout();\n        profileTimeout = () -> {\n            if (hid == null) {\n                Log.e(TAG, "TIMEOUT: HID profile proxy callback did not arrive within 12 seconds");\n                statusTv.setText("HID DIAGNOSTIC: Android accepted getProfileProxy(), but HID service callback never arrived (12s timeout). This suggests the phone's Bluetooth stack does not expose HID Device profile.");\n            }\n        };\n        diagnosticHandler.postDelayed(profileTimeout, 12000);\n    }\n\n    private void startRegistrationTimeout() {\n        cancelProfileTimeout();\n        profileTimeout = () -> {\n            if (!registered && registrationPending) {\n                registrationPending = false;\n                Log.e(TAG, "TIMEOUT: registerApp accepted but onAppStatusChanged callback did not arrive");\n                statusTv.setText("HID DIAGNOSTIC: registerApp() returned TRUE, but onAppStatusChanged() did not arrive within 12 seconds. Registration is stuck or rejected by Bluetooth stack.");\n            }\n        };\n        diagnosticHandler.postDelayed(profileTimeout, 12000);\n    }\n\n    private void cancelProfileTimeout() {\n        if (profileTimeout != null) {\n            diagnosticHandler.removeCallbacks(profileTimeout);\n            profileTimeout = null;\n        }\n    }\n\n    private String safeName(BluetoothDevice device) {\n        if (device == null) return "null";\n        try { return device.getName() + " (" + device.getAddress() + ")"; }\n        catch (SecurityException e) { return "name/address permission denied"; }\n    }\n\n    private void updateStatus() {
+    private void startProfileTimeout() {
+        cancelProfileTimeout();
+        profileTimeout = () -> {
+            if (hid == null) {
+                Log.e(TAG, "TIMEOUT: HID profile proxy callback did not arrive within 12 seconds");
+                statusTv.setText("HID DIAGNOSTIC: Android accepted getProfileProxy(), but HID service callback never arrived (12s timeout). This suggests the phone's Bluetooth stack does not expose HID Device profile.");
+            }
+        };
+        diagnosticHandler.postDelayed(profileTimeout, 12000);
+    }
+
+    private void startRegistrationTimeout() {
+        cancelProfileTimeout();
+        profileTimeout = () -> {
+            if (!registered && registrationPending) {
+                registrationPending = false;
+                Log.e(TAG, "TIMEOUT: registerApp accepted but onAppStatusChanged callback did not arrive");
+                statusTv.setText("HID DIAGNOSTIC: registerApp() returned TRUE, but onAppStatusChanged() did not arrive within 12 seconds. Registration is stuck or rejected by Bluetooth stack.");
+            }
+        };
+        diagnosticHandler.postDelayed(profileTimeout, 12000);
+    }
+
+    private void cancelProfileTimeout() {
+        if (profileTimeout != null) {
+            diagnosticHandler.removeCallbacks(profileTimeout);
+            profileTimeout = null;
+        }
+    }
+
+    private String safeName(BluetoothDevice device) {
+        if (device == null) return "null";
+        try { return device.getName() + " (" + device.getAddress() + ")"; }
+        catch (SecurityException e) { return "name/address permission denied"; }
+    }
+
+    private void updateStatus() {
         if (statusTv == null) return;
         if (connected != null) {
             String name = connected.getName();

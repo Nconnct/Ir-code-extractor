@@ -382,22 +382,39 @@ public class BluetoothRemoteActivity extends Activity {
             return;
         }
         try {
+            boolean sent;
             if (consumer) {
-                hid.sendReport(connected, 2, new byte[]{(byte) (usage & 0xFF), (byte) (usage >> 8)});
+                sent = hid.sendReport(connected, 2, new byte[]{(byte) (usage & 0xFF), (byte) (usage >> 8)});
             } else {
-                hid.sendReport(connected, 1, new byte[]{0, 0, (byte) usage, 0, 0, 0, 0, 0});
+                sent = hid.sendReport(connected, 1, new byte[]{0, 0, (byte) usage, 0, 0, 0, 0, 0});
             }
+            Log.i(TAG, "sendReport keydown consumer=" + consumer + " usage=0x"
+                    + Integer.toHexString(usage) + " result=" + sent
+                    + " target=" + safeName(connected));
+            statusTv.setText(sent ? "HID connected; key report sent."
+                    : "HID connection exists, but sendReport() returned FALSE. Check TV connection.");
         } catch (SecurityException e) {
+            Log.e(TAG, "sendReport permission failure", e);
             statusTv.setText("Bluetooth permission error: " + e.getMessage());
+        } catch (RuntimeException e) {
+            Log.e(TAG, "sendReport failed", e);
+            statusTv.setText("HID send failed: " + e.getMessage());
         }
     }
 
     private void release(boolean consumer) {
         if (hid == null || connected == null || !registered) return;
         try {
-            hid.sendReport(connected, consumer ? 2 : 1, new byte[consumer ? 2 : 8]);
+            boolean sent = hid.sendReport(connected, consumer ? 2 : 1, new byte[consumer ? 2 : 8]);
+            Log.i(TAG, "sendReport keyup consumer=" + consumer + " result=" + sent
+                    + " target=" + safeName(connected));
+            if (!sent) statusTv.setText("HID key release report returned FALSE.");
         } catch (SecurityException e) {
+            Log.e(TAG, "sendReport release permission failure", e);
             statusTv.setText("Bluetooth permission error: " + e.getMessage());
+        } catch (RuntimeException e) {
+            Log.e(TAG, "sendReport release failed", e);
+            statusTv.setText("HID release failed: " + e.getMessage());
         }
     }
 

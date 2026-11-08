@@ -13,7 +13,7 @@ download `acer-ir-sweep-apk` from the finished run, unzip it and install `app-de
 
 **Option B - Android Studio:** open this folder, let it sync, then Build > Build APK(s).
 
-Requires JDK 17. Android 5.0+ with an IR blaster.
+Requires JDK 17. Android 9+ with an IR blaster.
 
 ## Use it
 
@@ -28,7 +28,20 @@ Requires JDK 17. Android 5.0+ with an IR blaster.
 
 If a full standard sweep gets no reaction, tick **Extended NEC** and try 16-bit addresses.
 
+## Bluetooth remote
+
+Tap **Open Bluetooth remote**. The phone then pretends to be a Bluetooth keyboard / media remote
+(D-pad, OK, Back, Home, Menu, volume, mute, play/pause, channel). Power uses IR.
+
+1. On the TV: Settings > Remotes & Accessories > Pair remote or accessory.
+2. In the app: **Make phone discoverable**.
+3. Pick "Phone TV Remote" on the TV and confirm. Next time use **Connect to a paired device**.
+
+Needs Android 9+ and a phone whose Bluetooth stack allows HID device mode (most do, some
+manufacturers block it). Only one app at a time can use this mode.
+
 ## Files
 
 - `NecEncoder.java` - NEC pulse generator (checked against a real captured frame)
-- `MainActivity.java` - the whole UI
+- `MainActivity.java` - IR sweep + saved IR remote
+- `BluetoothRemoteActivity.java` - Bluetooth HID remote + IR power

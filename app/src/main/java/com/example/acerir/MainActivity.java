@@ -187,6 +187,12 @@ public class MainActivity extends Activity {
         }
         root.addView(remoteRow);
 
+        root.addView(heading("Bluetooth remote (D-pad, volume, home...)"));
+        Button btRemote = button("Open Bluetooth remote");
+        btRemote.setOnClickListener(v ->
+                startActivity(new android.content.Intent(this, BluetoothRemoteActivity.class)));
+        root.addView(btRemote);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
         setContentView(scroll);

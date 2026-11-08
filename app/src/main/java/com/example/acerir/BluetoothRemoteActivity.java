@@ -30,8 +30,10 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Makes the phone pose as a Bluetooth keyboard / media remote that the Google TV accepts,
- * and adds the IR Power button (the TV's real remote only uses IR for power).
+ * Makes the phone pose as a Bluetooth keyboard / media remote and adds an IR Power button.
+ *
+ * Bluetooth HID Device is a system-hosted profile. The phone must support the profile,
+ * and the TV must support pairing with an external HID device.
  */
 public class BluetoothRemoteActivity extends Activity {
 
@@ -74,6 +76,7 @@ public class BluetoothRemoteActivity extends Activity {
     private BluetoothHidDevice hid;
     private BluetoothDevice connected;
     private boolean registered;
+    private boolean registrationPending;
 
     private ConsumerIrManager ir;
     private SharedPreferences prefs;
@@ -83,6 +86,7 @@ public class BluetoothRemoteActivity extends Activity {
         @Override
         public void onAppStatusChanged(BluetoothDevice pluggedDevice, boolean isRegistered) {
             registered = isRegistered;
+            registrationPending = false;
             updateStatus();
         }
 
@@ -103,12 +107,29 @@ public class BluetoothRemoteActivity extends Activity {
                 public void onServiceConnected(int profile, BluetoothProfile proxy) {
                     if (profile != BluetoothProfile.HID_DEVICE) return;
                     hid = (BluetoothHidDevice) proxy;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                            && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                            != PackageManager.PERMISSION_GRANTED) {
+                        statusTv.setText("Bluetooth Connect permission is missing. Grant it and reopen this screen.");
+                        return;
+                    }
                     BluetoothHidDeviceAppSdpSettings sdp = new BluetoothHidDeviceAppSdpSettings(
                             "Phone TV Remote", "TV remote", "Acer IR Sweep",
                             BluetoothHidDevice.SUBCLASS1_COMBO, HID_DESCRIPTOR);
-                    boolean ok = hid.registerApp(sdp, null, null, getMainExecutor(), callback);
-                    if (!ok) {
-                        statusTv.setText("Bluetooth remote mode could not start on this phone.");
+                    registrationPending = true;
+                    boolean started;
+                    try {
+                        started = hid.registerApp(sdp, null, null, getMainExecutor(), callback);
+                    } catch (SecurityException e) {
+                        registrationPending = false;
+                        statusTv.setText("Bluetooth permission error: " + e.getMessage());
+                        return;
+                    }
+                    if (!started) {
+                        registrationPending = false;
+                        statusTv.setText("HID registration could not be started. This phone may not support Bluetooth HID Device mode.");
+                    } else {
+                        statusTv.setText("Registering Bluetooth remote...");
                     }
                 }
 
@@ -118,6 +139,7 @@ public class BluetoothRemoteActivity extends Activity {
                     hid = null;
                     connected = null;
                     registered = false;
+                    registrationPending = false;
                     updateStatus();
                 }
             };
@@ -128,27 +150,47 @@ public class BluetoothRemoteActivity extends Activity {
         ir = (ConsumerIrManager) getSystemService(Context.CONSUMER_IR_SERVICE);
         prefs = getSharedPreferences("codes", MODE_PRIVATE);
         buildUi();
+        requestBluetoothPermissions();
+    }
 
-        if (Build.VERSION.SDK_INT >= 31
-                && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, REQ_BT);
-        } else {
-            startHid();
+    private void requestBluetoothPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            List<String> missing = new ArrayList<>();
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                    != PackageManager.PERMISSION_GRANTED) {
+                missing.add(Manifest.permission.BLUETOOTH_CONNECT);
+            }
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+                    != PackageManager.PERMISSION_GRANTED) {
+                missing.add(Manifest.permission.BLUETOOTH_ADVERTISE);
+            }
+            if (!missing.isEmpty()) {
+                requestPermissions(missing.toArray(new String[0]), REQ_BT);
+                return;
+            }
         }
+        startHid();
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions,
                                            int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQ_BT) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startHid();
-            } else {
-                statusTv.setText("Bluetooth permission is needed for the Bluetooth remote.");
-            }
+        if (requestCode != REQ_BT) return;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED) {
+            statusTv.setText("Bluetooth Connect permission was denied. Allow it in app settings, then reopen this screen.");
+            return;
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+                != PackageManager.PERMISSION_GRANTED) {
+            statusTv.setText("Bluetooth Advertise permission was denied. Allow it in app settings, then reopen this screen.");
+            return;
+        }
+        startHid();
     }
 
     @Override
@@ -158,9 +200,10 @@ public class BluetoothRemoteActivity extends Activity {
             try {
                 hid.unregisterApp();
             } catch (RuntimeException ignored) {
-                // already unregistered
+                // The profile may already be disconnected.
             }
             if (adapter != null) adapter.closeProfileProxy(BluetoothProfile.HID_DEVICE, hid);
+            hid = null;
         }
     }
 
@@ -169,45 +212,90 @@ public class BluetoothRemoteActivity extends Activity {
     private void startHid() {
         BluetoothManager bm = getSystemService(BluetoothManager.class);
         adapter = bm == null ? null : bm.getAdapter();
-        if (adapter == null || !adapter.isEnabled()) {
+        if (adapter == null) {
+            statusTv.setText("Bluetooth is unavailable on this phone.");
+            return;
+        }
+        if (!adapter.isEnabled()) {
             statusTv.setText("Turn Bluetooth on, then reopen this screen.");
             return;
         }
-        boolean ok = adapter.getProfileProxy(this, serviceListener, BluetoothProfile.HID_DEVICE);
+        statusTv.setText("Requesting Bluetooth HID Device profile...");
+        boolean ok;
+        try {
+            ok = adapter.getProfileProxy(this, serviceListener, BluetoothProfile.HID_DEVICE);
+        } catch (SecurityException e) {
+            statusTv.setText("Cannot access Bluetooth profile: " + e.getMessage());
+            return;
+        }
         if (!ok) {
-            statusTv.setText("This phone does not offer Bluetooth remote (HID device) mode.");
-        } else {
-            statusTv.setText("Starting Bluetooth remote...");
+            statusTv.setText("This phone does not offer Bluetooth HID Device mode. IR remote will still work.");
         }
     }
 
     private void updateStatus() {
+        if (statusTv == null) return;
         if (connected != null) {
             String name = connected.getName();
             statusTv.setText("Connected to " + (name == null ? "the TV" : name));
         } else if (registered) {
-            statusTv.setText("Ready. Pair from the TV (steps above), "
-                    + "or tap \"Connect to a paired device\".");
+            statusTv.setText("HID registered. Make the phone discoverable, then scan for Phone TV Remote on the TV.");
+        } else if (registrationPending) {
+            statusTv.setText("Registering Bluetooth remote...");
+        } else if (hid != null) {
+            statusTv.setText("Bluetooth profile available; waiting for HID registration.");
         } else {
-            statusTv.setText("Starting Bluetooth remote...");
+            statusTv.setText("Bluetooth remote is not registered.");
         }
     }
 
     private void makeDiscoverable() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestBluetoothPermissions();
+            return;
+        }
+        if (!registered) {
+            statusTv.setText("The HID remote is not registered yet. Wait for registration or check phone HID support.");
+            return;
+        }
         Intent i = new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
         i.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300);
-        startActivity(i);
+        try {
+            startActivityForResult(i, REQ_BT + 1);
+        } catch (SecurityException e) {
+            statusTv.setText("Cannot enable discoverability: " + e.getMessage());
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_BT + 1) {
+            if (resultCode == RESULT_CANCELED) {
+                statusTv.setText("Discoverability was cancelled or denied by Android.");
+            } else {
+                statusTv.setText("Phone is discoverable. On the TV, scan for Phone TV Remote.");
+            }
+        }
     }
 
     private void chooseDeviceToConnect() {
-        if (hid == null || adapter == null) {
-            statusTv.setText("Bluetooth remote is not ready yet.");
+        if (hid == null || adapter == null || !registered) {
+            statusTv.setText("Bluetooth HID remote is not ready yet.");
             return;
         }
-        Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+        Set<BluetoothDevice> bonded;
+        try {
+            bonded = adapter.getBondedDevices();
+        } catch (SecurityException e) {
+            statusTv.setText("Bluetooth Connect permission is missing.");
+            return;
+        }
         final List<BluetoothDevice> devices = new ArrayList<>(bonded);
         if (devices.isEmpty()) {
-            statusTv.setText("No paired devices yet. Pair from the TV first.");
+            statusTv.setText("No paired devices yet. Start pairing from the TV while this phone is discoverable.");
             return;
         }
         String[] names = new String[devices.size()];
@@ -218,27 +306,39 @@ public class BluetoothRemoteActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("Connect to")
                 .setItems(names, (d, which) -> {
-                    boolean ok = hid.connect(devices.get(which));
-                    statusTv.setText(ok ? "Connecting..." : "Could not start the connection.");
+                    try {
+                        boolean ok = hid.connect(devices.get(which));
+                        statusTv.setText(ok ? "Connecting..." : "Could not start the connection.");
+                    } catch (SecurityException e) {
+                        statusTv.setText("Bluetooth Connect permission is missing.");
+                    }
                 })
                 .show();
     }
 
     private void press(boolean consumer, int usage) {
-        if (hid == null || connected == null) {
+        if (hid == null || connected == null || !registered) {
             statusTv.setText("Not connected to the TV yet.");
             return;
         }
-        if (consumer) {
-            hid.sendReport(connected, 2, new byte[]{(byte) (usage & 0xFF), (byte) (usage >> 8)});
-        } else {
-            hid.sendReport(connected, 1, new byte[]{0, 0, (byte) usage, 0, 0, 0, 0, 0});
+        try {
+            if (consumer) {
+                hid.sendReport(connected, 2, new byte[]{(byte) (usage & 0xFF), (byte) (usage >> 8)});
+            } else {
+                hid.sendReport(connected, 1, new byte[]{0, 0, (byte) usage, 0, 0, 0, 0, 0});
+            }
+        } catch (SecurityException e) {
+            statusTv.setText("Bluetooth permission error: " + e.getMessage());
         }
     }
 
     private void release(boolean consumer) {
-        if (hid == null || connected == null) return;
-        hid.sendReport(connected, consumer ? 2 : 1, new byte[consumer ? 2 : 8]);
+        if (hid == null || connected == null || !registered) return;
+        try {
+            hid.sendReport(connected, consumer ? 2 : 1, new byte[consumer ? 2 : 8]);
+        } catch (SecurityException e) {
+            statusTv.setText("Bluetooth permission error: " + e.getMessage());
+        }
     }
 
     // ---------------------------------------------------------------- IR power
@@ -275,15 +375,15 @@ public class BluetoothRemoteActivity extends Activity {
                 "First time pairing:\n"
                 + "1. On the TV: Settings > Remotes & Accessories > Pair remote or accessory.\n"
                 + "2. Here: tap Make phone discoverable.\n"
-                + "3. Choose \"Phone TV Remote\" (this phone) on the TV and confirm.\n"
-                + "Later, just tap Connect to a paired device.");
+                + "3. Choose \"Phone TV Remote\" on the TV and confirm.\n"
+                + "Later, use Connect to a paired device.");
         help.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         root.addView(help);
 
         statusTv = new TextView(this);
         statusTv.setPadding(0, dp(12), 0, dp(12));
         statusTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-        statusTv.setText("Starting Bluetooth remote...");
+        statusTv.setText("Checking Bluetooth permissions...");
         root.addView(statusTv);
 
         Button discover = textButton("Make phone discoverable");

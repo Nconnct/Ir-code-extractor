@@ -17,6 +17,9 @@ import android.hardware.ConsumerIrManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.TypedValue;
+import android.util.Log;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -38,6 +41,9 @@ import java.util.Set;
 public class BluetoothRemoteActivity extends Activity {
 
     private static final int REQ_BT = 41;
+    private static final String TAG = "AcerIR-HID";
+    private final Handler diagnosticHandler = new Handler(Looper.getMainLooper());
+    private Runnable profileTimeout;
 
     // HID usages (keyboard page 0x07)
     private static final int K_ENTER = 0x28;
@@ -85,13 +91,16 @@ public class BluetoothRemoteActivity extends Activity {
     private final BluetoothHidDevice.Callback callback = new BluetoothHidDevice.Callback() {
         @Override
         public void onAppStatusChanged(BluetoothDevice pluggedDevice, boolean isRegistered) {
+            Log.i(TAG, "onAppStatusChanged registered=" + isRegistered + " pluggedDevice=" + safeName(pluggedDevice));
             registered = isRegistered;
             registrationPending = false;
+            cancelProfileTimeout();
             updateStatus();
         }
 
         @Override
         public void onConnectionStateChanged(BluetoothDevice device, int state) {
+            Log.i(TAG, "onConnectionStateChanged state=" + state + " device=" + safeName(device));
             if (state == BluetoothProfile.STATE_CONNECTED) {
                 connected = device;
             } else if (device != null && device.equals(connected)) {
@@ -106,6 +115,8 @@ public class BluetoothRemoteActivity extends Activity {
                 @Override
                 public void onServiceConnected(int profile, BluetoothProfile proxy) {
                     if (profile != BluetoothProfile.HID_DEVICE) return;
+                    Log.i(TAG, "HID_DEVICE service connected; proxy=" + proxy.getClass().getName());
+                    cancelProfileTimeout();
                     hid = (BluetoothHidDevice) proxy;
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                             && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -117,25 +128,32 @@ public class BluetoothRemoteActivity extends Activity {
                             "Phone TV Remote", "TV remote", "Acer IR Sweep",
                             BluetoothHidDevice.SUBCLASS1_COMBO, HID_DESCRIPTOR);
                     registrationPending = true;
+                    statusTv.setText("HID service connected. Calling registerApp()...");
+                    Log.i(TAG, "Calling registerApp; descriptorBytes=" + HID_DESCRIPTOR.length);
                     boolean started;
                     try {
                         started = hid.registerApp(sdp, null, null, getMainExecutor(), callback);
+                        Log.i(TAG, "registerApp returned " + started);
                     } catch (SecurityException e) {
+                        Log.e(TAG, "registerApp SecurityException", e);
                         registrationPending = false;
-                        statusTv.setText("Bluetooth permission error: " + e.getMessage());
+                        statusTv.setText("HID registerApp permission failure: " + e.getMessage());
                         return;
                     }
                     if (!started) {
                         registrationPending = false;
-                        statusTv.setText("HID registration could not be started. This phone may not support Bluetooth HID Device mode.");
+                        statusTv.setText("HID DIAGNOSTIC: registerApp() returned FALSE. Phone Bluetooth stack refused HID registration.");
                     } else {
-                        statusTv.setText("Registering Bluetooth remote...");
+                        statusTv.setText("HID DIAGNOSTIC: registerApp() returned TRUE; waiting for onAppStatusChanged(true)...");
+                        startRegistrationTimeout();
                     }
                 }
 
                 @Override
                 public void onServiceDisconnected(int profile) {
                     if (profile != BluetoothProfile.HID_DEVICE) return;
+                    Log.w(TAG, "HID_DEVICE service disconnected");
+                    cancelProfileTimeout();
                     hid = null;
                     connected = null;
                     registered = false;
@@ -220,7 +238,9 @@ public class BluetoothRemoteActivity extends Activity {
             statusTv.setText("Turn Bluetooth on, then reopen this screen.");
             return;
         }
-        statusTv.setText("Requesting Bluetooth HID Device profile...");
+        statusTv.setText("HID DIAGNOSTIC: requesting HID_DEVICE profile proxy from Android...");
+        Log.i(TAG, "getProfileProxy HID_DEVICE; sdk=" + Build.VERSION.SDK_INT + " adapter=" + adapter.getName());
+        startProfileTimeout();
         boolean ok;
         try {
             ok = adapter.getProfileProxy(this, serviceListener, BluetoothProfile.HID_DEVICE);
@@ -229,11 +249,15 @@ public class BluetoothRemoteActivity extends Activity {
             return;
         }
         if (!ok) {
-            statusTv.setText("This phone does not offer Bluetooth HID Device mode. IR remote will still work.");
+            cancelProfileTimeout();
+            Log.e(TAG, "getProfileProxy returned FALSE for HID_DEVICE");
+            statusTv.setText("HID DIAGNOSTIC: getProfileProxy() returned FALSE. Android does not expose HID_DEVICE profile on this phone.");
+        } else {
+            Log.i(TAG, "getProfileProxy returned TRUE; waiting for ServiceListener callback");
         }
     }
 
-    private void updateStatus() {
+    private void startProfileTimeout() {\n        cancelProfileTimeout();\n        profileTimeout = () -> {\n            if (hid == null) {\n                Log.e(TAG, "TIMEOUT: HID profile proxy callback did not arrive within 12 seconds");\n                statusTv.setText("HID DIAGNOSTIC: Android accepted getProfileProxy(), but HID service callback never arrived (12s timeout). This suggests the phone's Bluetooth stack does not expose HID Device profile.");\n            }\n        };\n        diagnosticHandler.postDelayed(profileTimeout, 12000);\n    }\n\n    private void startRegistrationTimeout() {\n        cancelProfileTimeout();\n        profileTimeout = () -> {\n            if (!registered && registrationPending) {\n                registrationPending = false;\n                Log.e(TAG, "TIMEOUT: registerApp accepted but onAppStatusChanged callback did not arrive");\n                statusTv.setText("HID DIAGNOSTIC: registerApp() returned TRUE, but onAppStatusChanged() did not arrive within 12 seconds. Registration is stuck or rejected by Bluetooth stack.");\n            }\n        };\n        diagnosticHandler.postDelayed(profileTimeout, 12000);\n    }\n\n    private void cancelProfileTimeout() {\n        if (profileTimeout != null) {\n            diagnosticHandler.removeCallbacks(profileTimeout);\n            profileTimeout = null;\n        }\n    }\n\n    private String safeName(BluetoothDevice device) {\n        if (device == null) return "null";\n        try { return device.getName() + " (" + device.getAddress() + ")"; }\n        catch (SecurityException e) { return "name/address permission denied"; }\n    }\n\n    private void updateStatus() {
         if (statusTv == null) return;
         if (connected != null) {
             String name = connected.getName();
